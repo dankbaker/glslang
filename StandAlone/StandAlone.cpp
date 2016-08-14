@@ -412,7 +412,29 @@ void StderrIfNonEmpty(const char* str)
 struct ShaderCompUnit {
     EShLanguage stage;
     std::string fileName;
-    char** text;           // memory owned/managed externally
+    char** text;             // memory owned/managed externally
+	const char*  fileNamePointer;  // a pointer into file name, needed due to the way the compiler interface works
+
+	//Need to have a special constructors to adjust the filename pointer
+	//There is just no clean way to deal with this, the glsang back end is written as C++ style with pointers,
+	//where standalone is using std style strings and vector. The GLSL contexts require a pointer to a pointer
+	//for the name of the file
+	ShaderCompUnit(EShLanguage istage, std::string &ifileName, char** itext)
+	{
+		stage = istage;
+		fileName = ifileName;
+		text    = itext;
+		fileNamePointer = fileName.c_str();
+	}
+
+	ShaderCompUnit(const ShaderCompUnit &rhs)
+	{
+		stage = rhs.stage;
+		fileName = rhs.fileName;
+		text = rhs.text;
+		fileNamePointer = fileName.c_str();
+	}
+
 };
 
 //
@@ -439,7 +461,7 @@ void CompileAndLinkShaderUnits(std::vector<ShaderCompUnit> compUnits)
     for (auto it = compUnits.cbegin(); it != compUnits.cend(); ++it) {
         const auto &compUnit = *it;
         glslang::TShader* shader = new glslang::TShader(compUnit.stage);
-        shader->setStrings(compUnit.text, 1);
+        shader->setStringsWithLengthsAndNames(compUnit.text, NULL, &compUnit.fileNamePointer, 1);
         if (entryPointName) // HLSL todo: this needs to be tracked per compUnits
             shader->setEntryPoint(entryPointName);
         shaders.push_back(shader);
@@ -563,6 +585,7 @@ void CompileAndLinkShaderFiles()
             workItem->name,
             ReadFileData(workItem->name.c_str())
         };
+	
 
         if (! compUnit.text) {
             usage();
