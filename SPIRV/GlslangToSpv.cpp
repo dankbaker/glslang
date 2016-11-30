@@ -4118,11 +4118,9 @@ spv::Id TGlslangToSpvTraverser::createAtomicOperation(glslang::TOperator op, spv
 // Create group invocation operations.
 spv::Id TGlslangToSpvTraverser::createInvocationsOperation(glslang::TOperator op, spv::Id typeId, std::vector<spv::Id>& operands, glslang::TBasicType typeProxy)
 {
-    bool isUnsigned = typeProxy == glslang::EbtUint || typeProxy == glslang::EbtUint64;
 #ifdef AMD_EXTENSIONS
+    bool isUnsigned = typeProxy == glslang::EbtUint || typeProxy == glslang::EbtUint64;
     bool isFloat = typeProxy == glslang::EbtFloat || typeProxy == glslang::EbtDouble || typeProxy == glslang::EbtFloat16;
-#else
-    bool isFloat = typeProxy == glslang::EbtFloat || typeProxy == glslang::EbtDouble;
 #endif
 
     spv::Op opCode = spv::OpNop;
@@ -4599,7 +4597,7 @@ spv::Id TGlslangToSpvTraverser::createNoArgOperation(glslang::TOperator op, spv:
         builder.createNoResultOp(spv::OpEndPrimitive);
         return 0;
     case glslang::EOpBarrier:
-        builder.createControlBarrier(spv::ScopeDevice, spv::ScopeDevice, spv::MemorySemanticsMaskNone);
+        builder.createControlBarrier(spv::ScopeWorkgroup, spv::ScopeDevice, spv::MemorySemanticsMaskNone);
         return 0;
     case glslang::EOpMemoryBarrier:
         builder.createMemoryBarrier(spv::ScopeDevice, spv::MemorySemanticsAllMemory);

@@ -306,6 +306,7 @@ public:
     void setEntryPoint(const char* entryPoint);
     void setShiftSamplerBinding(unsigned int base);
     void setShiftTextureBinding(unsigned int base);
+    void setShiftImageBinding(unsigned int base);
     void setShiftUboBinding(unsigned int base);
     void setAutoMapBindings(bool map);
     void setFlattenUniformArrays(bool flatten);
@@ -510,6 +511,7 @@ public:
     int getAttributeType(int index) const;                 // can be used for glGetActiveAttrib()
     const TType* getUniformTType(int index) const;         // returns a TType*
     const TType* getUniformBlockTType(int index) const;    // returns a TType*    
+    const TType* getAttributeTType(int index) const;       // returns a TType*
 
     void dumpReflection();
 
