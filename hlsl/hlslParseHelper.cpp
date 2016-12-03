@@ -55,7 +55,7 @@ HlslParseContext::HlslParseContext(TSymbolTable& symbolTable, TIntermediate& int
     TParseContextBase(symbolTable, interm, parsingBuiltins, version, profile, spvVersion, language, infoSink, forwardCompatible, messages),
     contextPragma(true, false),
     loopNestingLevel(0), annotationNestingLevel(0), structNestingLevel(0), controlFlowNestingLevel(0),
-    postMainReturn(false),
+    postEntryPointReturn(false),
     limits(resources.limits),
     entryPointOutput(nullptr),
     nextInLocation(0), nextOutLocation(0)
@@ -1141,7 +1141,7 @@ TIntermAggregate* HlslParseContext::handleFunctionDefinition(const TSourceLoc& l
     intermediate.setAggregateOperator(paramNodes, EOpParameters, TType(EbtVoid), loc);
     loopNestingLevel = 0;
     controlFlowNestingLevel = 0;
-    postMainReturn = false;
+    postEntryPointReturn = false;
 
     // Handle function attributes
     if (inEntryPoint) {
@@ -3285,7 +3285,7 @@ bool HlslParseContext::builtInName(const TString& /*identifier*/)
 //
 // Returns true if there was an error in construction.
 //
-bool HlslParseContext::constructorError(const TSourceLoc& loc, TIntermNode* /*node*/, TFunction& function,
+bool HlslParseContext::constructorError(const TSourceLoc& loc, TIntermNode* node, TFunction& function,
                                         TOperator op, TType& type)
 {
     type.shallowCopy(function.getType());
@@ -3381,7 +3381,7 @@ bool HlslParseContext::constructorError(const TSourceLoc& loc, TIntermNode* /*no
 
             // At least the dimensionalities have to match.
             if (! function[0].type->isArray() || arraySizes.getNumDims() != function[0].type->getArraySizes().getNumDims() + 1) {
-                error(loc, "array constructor argument not correct type to construct array element", "constructior", "");
+                error(loc, "array constructor argument not correct type to construct array element", "constructor", "");
                 return true;
             }
 
@@ -3411,6 +3411,9 @@ bool HlslParseContext::constructorError(const TSourceLoc& loc, TIntermNode* /*no
         return true;
     }
 
+    if (op == EOpConstructStruct && ! type.isArray() && isZeroConstructor(node))
+        return false;
+
     if (op == EOpConstructStruct && ! type.isArray() && (int)type.getStruct()->size() != function.getParamCount()) {
         error(loc, "Number of constructor parameters does not match the number of structure fields", "constructor", "");
         return true;
@@ -3422,9 +3425,13 @@ bool HlslParseContext::constructorError(const TSourceLoc& loc, TIntermNode* /*no
         return true;
     }
 
-    // TIntermTyped* typed = node->getAsTyped();
-
     return false;
+}
+
+bool HlslParseContext::isZeroConstructor(const TIntermNode* node)
+{
+    return node->getAsTyped()->isScalar() && node->getAsConstantUnion() &&
+           node->getAsConstantUnion()->getConstArray()[0].getIConst() == 0;
 }
 
 // Verify all the correct semantics for constructing a combined texture/sampler.
@@ -4594,7 +4601,8 @@ TIntermNode* HlslParseContext::executeInitializer(const TSourceLoc& loc, TInterm
     // constructor-style subtree, allowing the rest of the code to operate
     // identically for both kinds of initializers.
     //
-    initializer = convertInitializerList(loc, variable->getType(), initializer);
+    if (initializer->getAsAggregate() && initializer->getAsAggregate()->getOp() == EOpNull)
+        initializer = convertInitializerList(loc, variable->getType(), initializer);
     if (! initializer) {
         // error recovery; don't leave const without constant values
         if (qualifier == EvqConst)
@@ -4671,6 +4679,11 @@ TIntermNode* HlslParseContext::executeInitializer(const TSourceLoc& loc, TInterm
 // creating a constructor-style initializer, ensuring we get the
 // same form.
 //
+// Returns a node representing an expression for the initializer list expressed
+// as the correct type.
+//
+// Returns nullptr if there is an error.
+//
 TIntermTyped* HlslParseContext::convertInitializerList(const TSourceLoc& loc, const TType& type, TIntermTyped* initializer)
 {
     // Will operate recursively.  Once a subtree is found that is constructor style,
@@ -4679,8 +4692,15 @@ TIntermTyped* HlslParseContext::convertInitializerList(const TSourceLoc& loc, co
 
     // see if we have bottomed out in the tree within the initializer-list part
     TIntermAggregate* initList = initializer->getAsAggregate();
-    if (! initList || initList->getOp() != EOpNull)
-        return initializer;
+    if (! initList || initList->getOp() != EOpNull) {
+        // We don't have a list, but if it's a scalar and the 'type' is a
+        // composite, we need to lengthen below to make it useful.
+        // Otherwise, this is an already formed object to initialize with.
+        if (type.isScalar() || !initializer->getType().isScalar())
+            return initializer;
+        else
+            initList = intermediate.makeAggregate(initializer);
+    }
 
     // Of the initializer-list set of nodes, need to process bottom up,
     // so recurse deep, then process on the way up.
@@ -4694,7 +4714,8 @@ TIntermTyped* HlslParseContext::convertInitializerList(const TSourceLoc& loc, co
         arrayType.newArraySizes(*type.getArraySizes());  // but get a fresh copy of the array information, to edit below
 
         // edit array sizes to fill in unsized dimensions
-        arrayType.changeOuterArraySize((int)initList->getSequence().size());
+        if (type.isImplicitlySizedArray())
+            arrayType.changeOuterArraySize((int)initList->getSequence().size());
         TIntermTyped* firstInit = initList->getSequence()[0]->getAsTyped();
         if (arrayType.isArrayOfArrays() && firstInit->getType().isArray() &&
             arrayType.getArraySizes().getNumDims() == firstInit->getType().getArraySizes()->getNumDims() + 1) {
@@ -4704,8 +4725,12 @@ TIntermTyped* HlslParseContext::convertInitializerList(const TSourceLoc& loc, co
             }
         }
 
+        // lengthen list to be long enough
+        lengthenList(loc, initList->getSequence(), arrayType.getOuterArraySize());
+
+        // recursively process each element
         TType elementType(arrayType, 0); // dereferenced type
-        for (size_t i = 0; i < initList->getSequence().size(); ++i) {
+        for (int i = 0; i < arrayType.getOuterArraySize(); ++i) {
             initList->getSequence()[i] = convertInitializerList(loc, elementType, initList->getSequence()[i]->getAsTyped());
             if (initList->getSequence()[i] == nullptr)
                 return nullptr;
@@ -4713,6 +4738,9 @@ TIntermTyped* HlslParseContext::convertInitializerList(const TSourceLoc& loc, co
 
         return addConstructor(loc, initList, arrayType);
     } else if (type.isStruct()) {
+        // lengthen list to be long enough
+        lengthenList(loc, initList->getSequence(), type.getStruct()->size());
+
         if (type.getStruct()->size() != initList->getSequence().size()) {
             error(loc, "wrong number of structure members", "initializer list", "");
             return nullptr;
@@ -4728,6 +4756,9 @@ TIntermTyped* HlslParseContext::convertInitializerList(const TSourceLoc& loc, co
             // a series of rows and columns.  We can just use the list directly as
             // a constructor; no further processing needed.
         } else {
+            // lengthen list to be long enough
+            lengthenList(loc, initList->getSequence(), type.getMatrixCols());
+
             if (type.getMatrixCols() != (int)initList->getSequence().size()) {
                 error(loc, "wrong number of matrix columns:", "initializer list", type.getCompleteString().c_str());
                 return nullptr;
@@ -4740,6 +4771,10 @@ TIntermTyped* HlslParseContext::convertInitializerList(const TSourceLoc& loc, co
             }
         }
     } else if (type.isVector()) {
+        // lengthen list to be long enough
+        lengthenList(loc, initList->getSequence(), type.getVectorSize());
+
+        // error check; we're at bottom, so work is finished below
         if (type.getVectorSize() != (int)initList->getSequence().size()) {
             error(loc, "wrong vector size (or rows in a matrix column):", "initializer list", type.getCompleteString().c_str());
             return nullptr;
@@ -4749,7 +4784,7 @@ TIntermTyped* HlslParseContext::convertInitializerList(const TSourceLoc& loc, co
             error(loc, "scalar expected one element:", "initializer list", type.getCompleteString().c_str());
             return nullptr;
         }
-   } else {
+    } else {
         error(loc, "unexpected initializer-list type:", "initializer list", type.getCompleteString().c_str());
         return nullptr;
     }
@@ -4761,7 +4796,17 @@ TIntermTyped* HlslParseContext::convertInitializerList(const TSourceLoc& loc, co
         emulatedConstructorArguments = initList->getSequence()[0];
     else
         emulatedConstructorArguments = initList;
+
     return addConstructor(loc, emulatedConstructorArguments, type);
+}
+
+// Lengthen list to be long enough to cover any gap from the current list size
+// to 'size'. If the list is longer, do nothing.
+// The value to lengthen with is the default for short lists.
+void HlslParseContext::lengthenList(const TSourceLoc& loc, TIntermSequence& list, int size)
+{
+    for (int c = (int)list.size(); c < size; ++c)
+        list.push_back(intermediate.addConstantUnion(0, loc));
 }
 
 //
@@ -4774,6 +4819,10 @@ TIntermTyped* HlslParseContext::addConstructor(const TSourceLoc& loc, TIntermNod
 {
     if (node == nullptr || node->getAsTyped() == nullptr)
         return nullptr;
+
+    // Handle the idiom "(struct type)0"
+    if (type.isStruct() && isZeroConstructor(node))
+        return convertInitializerList(loc, type, intermediate.makeAggregate(loc));
 
     TIntermAggregate* aggrNode = node->getAsAggregate();
     TOperator op = intermediate.mapTypeToConstructorOp(type);
