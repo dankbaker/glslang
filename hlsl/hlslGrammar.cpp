@@ -90,10 +90,11 @@ bool HlslGrammar::acceptIdentifier(HlslToken& idToken)
     // as "linear" or "centroid" NOT valid identifiers.  This code special cases "sample",
     // so e.g, "int sample;" is accepted.
     if (peekTokenClass(EHTokSample)) {
-        idToken.string     = NewPoolTString("sample");
-        idToken.tokenClass = EHTokIdentifier;
-        idToken.symbol     = nullptr;
-        idToken.loc        = token.loc;
+        token.string     = NewPoolTString("sample");
+        token.tokenClass = EHTokIdentifier;
+        token.symbol     = nullptr;
+
+        idToken          = token;
         advanceToken();
         return true;
     }
@@ -389,7 +390,7 @@ bool HlslGrammar::acceptDeclaration(TIntermNode*& node)
                 else if (variableType.getBasicType() == EbtBlock)
                     parseContext.declareBlock(idToken.loc, variableType, idToken.string);
                 else {
-                    if (variableType.getQualifier().storage == EvqUniform && ! variableType.isOpaque()) {
+                    if (variableType.getQualifier().storage == EvqUniform && ! variableType.containsOpaque()) {
                         // this isn't really an individual variable, but a member of the $Global buffer
                         parseContext.growGlobalUniformBlock(idToken.loc, variableType, *idToken.string);
                     } else {
@@ -475,8 +476,15 @@ bool HlslGrammar::acceptFullySpecifiedType(TType& type)
     TSourceLoc loc = token.loc;
 
     // type_specifier
-    if (! acceptType(type))
+    if (! acceptType(type)) {
+        // If this is not a type, we may have inadvertently gone down a wrong path
+        // py parsing "sample", which can be treated like either an identifier or a
+        // qualifier.  Back it out, if we did.
+        if (qualifier.sample)
+            recedeToken();
+
         return false;
+    }
     if (type.getBasicType() == EbtBlock) {
         // the type was a block, which set some parts of the qualifier
         parseContext.mergeQualifiers(type.getQualifier(), qualifier);
@@ -2203,7 +2211,7 @@ bool HlslGrammar::acceptPostfixExpression(TIntermTyped*& node)
     } else if (acceptIdentifier(idToken)) {
         // identifier or function_call name
         if (! peekTokenClass(EHTokLeftParen)) {
-            node = parseContext.handleVariable(idToken.loc, idToken.symbol, token.string);
+            node = parseContext.handleVariable(idToken.loc, idToken.symbol, idToken.string);
         } else if (acceptFunctionCall(idToken, node)) {
             // function_call (nothing else to do yet)
         } else {
@@ -2214,6 +2222,20 @@ bool HlslGrammar::acceptPostfixExpression(TIntermTyped*& node)
         // nothing found, can't post operate
         return false;
     }
+
+    // This is to guarantee we do this no matter how we get out of the stack frame.
+    // This way there's no bug if an early return forgets to do it.
+    struct tFinalize {
+        tFinalize(HlslParseContext& p) : parseContext(p) { }
+        ~tFinalize() { parseContext.finalizeFlattening(); }
+       HlslParseContext& parseContext;
+    } finalize(parseContext);
+
+    // Initialize the flattening accumulation data, so we can track data across multiple bracket or
+    // dot operators.  This can also be nested, e.g, for [], so we have to track each nesting
+    // level: hence the init and finalize.  Even though in practice these must be
+    // constants, they are parsed no matter what.
+    parseContext.initFlattening();
 
     // Something was found, chain as many postfix operations as exist.
     do {
@@ -2248,7 +2270,7 @@ bool HlslGrammar::acceptPostfixExpression(TIntermTyped*& node)
             node = parseContext.handleDotDereference(field.loc, node, *field.string);
 
             // In the event of a method node, we look for an open paren and accept the function call.
-            if (node->getAsMethodNode() != nullptr && peekTokenClass(EHTokLeftParen)) {
+            if (node != nullptr && node->getAsMethodNode() != nullptr && peekTokenClass(EHTokLeftParen)) {
                 if (! acceptFunctionCall(field, node, base)) {
                     expected("function parameters");
                     return false;

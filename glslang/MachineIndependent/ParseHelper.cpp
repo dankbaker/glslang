@@ -604,7 +604,11 @@ void TParseContext::fixIoArraySize(const TSourceLoc& loc, TType& type)
 void TParseContext::ioArrayCheck(const TSourceLoc& loc, const TType& type, const TString& identifier)
 {
     if (! type.isArray() && ! symbolTable.atBuiltInLevel()) {
-        if (type.getQualifier().isArrayedIo(language))
+        if (type.getQualifier().isArrayedIo(language)
+#ifdef NV_EXTENSIONS
+            && !type.getQualifier().layoutPassthrough
+#endif
+           )
             error(loc, "type must be an array:", type.getStorageQualifierString(), identifier.c_str());
     }
 }
@@ -1109,9 +1113,10 @@ TIntermTyped* TParseContext::handleFunctionCall(const TSourceLoc& loc, TFunction
                 // if builtIn == true, it's definitely a built-in function with EOpNull
                 if (! builtIn) {
                     call->setUserDefined();
-                    if (symbolTable.atGlobalLevel())
-                        error(loc, "can't call user function from global scope", fnCandidate->getName().c_str(), "");
-                    else
+                    if (symbolTable.atGlobalLevel()) {
+                        requireProfile(loc, ~EEsProfile, "calling user function from global scope");
+                        intermediate.addToCallGraph(infoSink, "main(", fnCandidate->getMangledName());
+                    } else
                         intermediate.addToCallGraph(infoSink, currentCaller, fnCandidate->getMangledName());
                 }
 
@@ -3250,7 +3255,7 @@ bool TParseContext::lineDirectiveShouldSetNextLine() const
 void TParseContext::nonInitConstCheck(const TSourceLoc& loc, TString& identifier, TType& type)
 {
     //
-    // Make the qualifier make sense, given that there is an initializer.
+    // Make the qualifier make sense, given that there is not an initializer.
     //
     if (type.getQualifier().storage == EvqConst ||
         type.getQualifier().storage == EvqConstReadOnly) {
@@ -3303,6 +3308,9 @@ TSymbol* TParseContext::redeclareBuiltinVariable(const TSourceLoc& loc, const TS
          identifier == "gl_BackSecondaryColor"                                                      ||
          identifier == "gl_SecondaryColor"                                                          ||
         (identifier == "gl_Color"               && language == EShLangFragment)                     ||
+#ifdef NV_EXTENSIONS
+         identifier == "gl_SampleMask"                                                              ||
+#endif
          identifier == "gl_TexCoord") {
 
         // Find the existing symbol, if any.
@@ -3380,8 +3388,16 @@ TSymbol* TParseContext::redeclareBuiltinVariable(const TSourceLoc& loc, const TS
                 if (! intermediate.setDepth(publicType.layoutDepth))
                     error(loc, "all redeclarations must use the same depth layout on", "redeclaration", symbol->getName().c_str());
             }
-
         }
+#ifdef NV_EXTENSIONS 
+        else if (identifier == "gl_SampleMask") {
+            if (!publicType.layoutOverrideCoverage) {
+                error(loc, "redeclaration only allowed for override_coverage layout", "redeclaration", symbol->getName().c_str());
+            }
+            intermediate.setLayoutOverrideCoverage();
+        }
+#endif
+
         // TODO: semantics quality: separate smooth from nothing declared, then use IsInterpolation for several tests above
 
         return symbol;
@@ -3447,6 +3463,20 @@ void TParseContext::redeclareBuiltinBlock(const TSourceLoc& loc, TTypeList& newT
     //  - remove unused members
     //  - ensure remaining qualifiers/types match
     TType& type = block->getWritableType();
+
+#ifdef NV_EXTENSIONS
+    // if gl_PerVertex is redeclared for the purpose of passing through "gl_Position"
+    // for passthrough purpose, the redclared block should have the same qualifers as
+    // the current one
+    if (currentBlockQualifier.layoutPassthrough)
+    {
+        type.getQualifier().layoutPassthrough = currentBlockQualifier.layoutPassthrough;
+        type.getQualifier().storage = currentBlockQualifier.storage;
+        type.getQualifier().layoutStream = currentBlockQualifier.layoutStream;
+        type.getQualifier().layoutXfbBuffer = currentBlockQualifier.layoutXfbBuffer;
+    }
+#endif
+
     TTypeList::iterator member = type.getWritableStruct()->begin();
     size_t numOriginalMembersFound = 0;
     while (member != type.getStruct()->end()) {
@@ -3916,6 +3946,14 @@ void TParseContext::setLayoutQualifier(const TSourceLoc& loc, TPublicType& publi
                 publicType.shaderQualifiers.geometry = ElgTriangleStrip;
                 return;
             }
+#ifdef NV_EXTENSIONS
+            if (id == "passthrough") {
+               requireExtensions(loc, 1, &E_SPV_NV_geometry_shader_passthrough, "geometry shader passthrough");
+               publicType.qualifier.layoutPassthrough = true;
+               intermediate.setGeoPassthroughEXT();
+               return;
+            }
+#endif
         } else {
             assert(language == EShLangTessEvaluation);
 
@@ -4004,6 +4042,13 @@ void TParseContext::setLayoutQualifier(const TSourceLoc& loc, TPublicType& publi
                 error(loc, "unknown blend equation", "blend_support", "");
             return;
         }
+#ifdef NV_EXTENSIONS 
+        if (id == "override_coverage") {
+            requireExtensions(loc, 1, &E_GL_NV_sample_mask_override_coverage, "sample mask override coverage");
+            publicType.shaderQualifiers.layoutOverrideCoverage = true;
+            return;
+        }
+#endif
     }
     error(loc, "unrecognized layout identifier, or qualifier requires assignment (e.g., binding = 4)", id.c_str(), "");
 }
@@ -4309,6 +4354,11 @@ void TParseContext::mergeObjectLayoutQualifiers(TQualifier& dst, const TQualifie
 
         if (src.layoutPushConstant)
             dst.layoutPushConstant = true;
+
+#ifdef NV_EXTENSIONS
+        if (src.layoutPassthrough)
+            dst.layoutPassthrough = true;
+#endif
     }
 }
 
@@ -4874,7 +4924,7 @@ const TFunction* TParseContext::findFunction400(const TSourceLoc& loc, const TFu
     symbolTable.findFunctionNameList(call.getMangledName(), candidateList, builtIn);
     
     // can 'from' convert to 'to'?
-    const auto convertible = [this](const TType& from, const TType& to) -> bool {
+    const auto convertible = [this](const TType& from, const TType& to, TOperator, int) -> bool {
         if (from == to)
             return true;
         if (from.isArray() || to.isArray() || ! from.sameElementShape(to))
@@ -4957,7 +5007,7 @@ TIntermNode* TParseContext::declareVariable(const TSourceLoc& loc, TString& iden
     if (voidErrorCheck(loc, identifier, type.getBasicType()))
         return nullptr;
 
-    if (initializer)        
+    if (initializer)
         rValueErrorCheck(loc, "initializer", initializer);
     else
         nonInitConstCheck(loc, identifier, type);

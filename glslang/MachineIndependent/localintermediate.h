@@ -67,7 +67,9 @@ struct TVectorFields {
 // by TIntermediate.
 //
 
-// Used for detecting recursion:  A "call" is a pair: <caller, callee>.
+// Used for call-graph algorithms for detecting recursion, missing bodies, and dead bodies.
+// A "call" is a pair: <caller, callee>.
+// There can be duplicates. General assumption is the list is small.
 struct TCall {
     TCall(const TString& pCaller, const TString& pCallee) : caller(pCaller), callee(pCallee) { }
     TString caller;
@@ -75,6 +77,7 @@ struct TCall {
     bool visited;
     bool currentPath;
     bool errorGiven;
+    int calleeBodyPosition;
 };
 
 // A generic 1-D range.
@@ -148,6 +151,10 @@ public:
         shiftUboBinding(0),
         autoMapBindings(false),
         flattenUniformArrays(false),
+#ifdef NV_EXTENSIONS 
+        layoutOverrideCoverage(false),
+        geoPassthroughEXT(false),
+#endif
         useUnknownFormat(false)
     {
         localSize[0] = 1;
@@ -361,7 +368,7 @@ public:
 
     void addToCallGraph(TInfoSink&, const TString& caller, const TString& callee);
     void merge(TInfoSink&, TIntermediate&);
-    void finalCheck(TInfoSink&);
+    void finalCheck(TInfoSink&, bool keepUncalled);
 
     void addIoAccessed(const TString& name) { ioAccessed.insert(name); }
     bool inIoAccessed(const TString& name) const { return ioAccessed.find(name) != ioAccessed.end(); }
@@ -384,6 +391,13 @@ public:
     static int getBaseAlignment(const TType&, int& size, int& stride, bool std140, bool rowMajor);
     bool promote(TIntermOperator*);
 
+#ifdef NV_EXTENSIONS 
+    void setLayoutOverrideCoverage() { layoutOverrideCoverage = true; }
+    bool getLayoutOverrideCoverage() const { return layoutOverrideCoverage; }
+    void setGeoPassthroughEXT() { geoPassthroughEXT = true; }
+    bool getGeoPassthroughEXT() const { return geoPassthroughEXT; }
+#endif
+
 protected:
     TIntermSymbol* addSymbol(int Id, const TString&, const TType&, const TConstUnionArray&, TIntermTyped* subtree, const TSourceLoc&);
     void error(TInfoSink& infoSink, const char*);
@@ -393,6 +407,7 @@ protected:
     void mergeImplicitArraySizes(TType&, const TType&);
     void mergeErrorCheck(TInfoSink&, const TIntermSymbol&, const TIntermSymbol&, bool crossStage);
     void checkCallGraphCycles(TInfoSink&);
+    void checkCallGraphBodies(TInfoSink&, bool keepUncalled);
     void inOutLocationCheck(TInfoSink&);
     TIntermSequence& findLinkerObjects() const;
     bool userOutputUsed() const;
@@ -442,6 +457,11 @@ protected:
     int blendEquations;        // an 'or'ing of masks of shifts of TBlendEquationShift
     bool xfbMode;
     bool multiStream;
+
+#ifdef NV_EXTENSIONS 
+    bool layoutOverrideCoverage;
+    bool geoPassthroughEXT;
+#endif
 
     typedef std::list<TCall> TGraph;
     TGraph callGraph;
