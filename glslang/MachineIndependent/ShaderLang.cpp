@@ -47,11 +47,14 @@
 #include <memory>
 #include "SymbolTable.h"
 #include "ParseHelper.h"
-#include "../../hlsl/hlslParseHelper.h"
-#include "../../hlsl/hlslParseables.h"
 #include "Scan.h"
 #include "ScanContext.h"
+
+#ifdef ENABLE_HLSL
+#include "../../hlsl/hlslParseHelper.h"
+#include "../../hlsl/hlslParseables.h"
 #include "../../hlsl/hlslScanContext.h"
+#endif
 
 #include "../Include/ShHandle.h"
 #include "../../OGLCompilersDLL/InitializeDll.h"
@@ -73,7 +76,9 @@ TBuiltInParseables* CreateBuiltInParseables(TInfoSink& infoSink, EShSource sourc
 {
     switch (source) {
     case EShSourceGlsl: return new TBuiltIns();              // GLSL builtIns
+#ifdef ENABLE_HLSL
     case EShSourceHlsl: return new TBuiltInParseablesHlsl(); // HLSL intrinsics
+#endif
 
     default:
         infoSink.info.message(EPrefixInternalError, "Unable to determine source language");
@@ -88,15 +93,21 @@ TParseContextBase* CreateParseContext(TSymbolTable& symbolTable, TIntermediate& 
                                       SpvVersion spvVersion, bool forwardCompatible, EShMessages messages,
                                       bool parsingBuiltIns, const std::string sourceEntryPointName = "")
 {
+#ifndef ENABLE_HLSL
+    (void)sourceEntryPointName; // Unused argument.
+#endif
+
     switch (source) {
     case EShSourceGlsl:
         intermediate.setEntryPointName("main");
         return new TParseContext(symbolTable, intermediate, parsingBuiltIns, version, profile, spvVersion,
                                  language, infoSink, forwardCompatible, messages);
 
+#ifdef ENABLE_HLSL
     case EShSourceHlsl:
         return new HlslParseContext(symbolTable, intermediate, parsingBuiltIns, version, profile, spvVersion,
                                     language, infoSink, sourceEntryPointName.c_str(), forwardCompatible, messages);
+#endif
     default:
         infoSink.info.message(EPrefixInternalError, "Unable to determine source language");
         return nullptr;
@@ -221,7 +232,7 @@ bool InitializeSymbolTable(const TString& builtIns, int version, EProfile profil
                                                                        language, infoSink, spvVersion, true, EShMsgDefault,
                                                                        true));
 
-    TShader::ForbidInclude includer;
+    TShader::ForbidIncluder includer;
     TPpContext ppContext(*parseContext, "", includer);
     TScanContext scanContext(*parseContext);
     parseContext->setScanContext(&scanContext);
@@ -285,6 +296,9 @@ bool InitializeSymbolTables(TInfoSink& infoSink, TSymbolTable** commonTable,  TS
 {
     std::unique_ptr<TBuiltInParseables> builtInParseables(CreateBuiltInParseables(infoSink, source));
 
+    if (builtInParseables == nullptr)
+        return false;
+
     builtInParseables->initialize(version, profile, spvVersion);
 
     // do the common tables
@@ -330,6 +344,9 @@ bool AddContextSpecificSymbols(const TBuiltInResource* resources, TInfoSink& inf
                                EProfile profile, const SpvVersion& spvVersion, EShLanguage language, EShSource source)
 {
     std::unique_ptr<TBuiltInParseables> builtInParseables(CreateBuiltInParseables(infoSink, source));
+
+    if (builtInParseables == nullptr)
+        return false;
 
     builtInParseables->initialize(*resources, version, profile, spvVersion, language);
     InitializeSymbolTable(builtInParseables->getCommonString(), version, profile, spvVersion, language, source, infoSink, symbolTable);
@@ -725,8 +742,9 @@ bool ProcessDeferred(
 
     // Add built-in symbols that are potentially context dependent;
     // they get popped again further down.
-    AddContextSpecificSymbols(resources, compiler->infoSink, symbolTable, version, profile, spvVersion,
-                              compiler->getLanguage(), source);
+    if (! AddContextSpecificSymbols(resources, compiler->infoSink, symbolTable, version, profile, spvVersion,
+                                    compiler->getLanguage(), source))
+        return false;
 
     //
     // Now we can process the full shader under proper symbols and rules.
@@ -1085,7 +1103,9 @@ int ShInitialize()
         PerProcessGPA = new TPoolAllocator();
 
     glslang::TScanContext::fillInKeywordMap();
+#ifdef ENABLE_HLSL
     glslang::HlslScanContext::fillInKeywordMap();
+#endif
 
     return 1;
 }
@@ -1178,7 +1198,9 @@ int __fastcall ShFinalize()
     }
 
     glslang::TScanContext::deleteKeywordMap();
+#ifdef ENABLE_HLSL
     glslang::HlslScanContext::deleteKeywordMap();
+#endif
 
     return 1;
 }
@@ -1217,7 +1239,7 @@ int ShCompile(
     compiler->infoSink.debug.erase();
 
     TIntermediate intermediate(compiler->getLanguage());
-    TShader::ForbidInclude includer;
+    TShader::ForbidIncluder includer;
     bool success = CompileDeferred(compiler, shaderStrings, numStrings, inputLengths, nullptr,
                                    "", optLevel, resources, defaultVersion, ENoProfile, false,
                                    forwardCompatible, messages, intermediate, includer);
